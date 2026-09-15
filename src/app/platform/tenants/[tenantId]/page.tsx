@@ -73,11 +73,27 @@ export default function TenantDetailPage() {
     }).catch((e) => setError(e instanceof Error ? e.message : "Failed to load")).finally(() => setLoading(false));
   }, [tenantId]);
 
-  const handleSaveSubscription = async () => { if (!tenantId) return; setSaving(true); try { const updated = await platformApi.updateTenantSubscription(tenantId, { subscriptionType: "plan", planKey, overrides, startDate: subscriptionStartDate || null, expireDate: subscriptionExpireDate || null }); setDetail(updated); setOverrides({ features: updated.overrides.features, limits: updated.overrides.limits }); setSubscriptionStartDate(updated.startDate ? new Date(updated.startDate).toISOString().slice(0, 10) : ""); setSubscriptionExpireDate(updated.expireDate ? new Date(updated.expireDate).toISOString().slice(0, 10) : ""); setSubscriptionMode("plan"); setToast({ message: "Subscription saved" }); } catch (e) { setToast({ message: e instanceof Error ? e.message : "Failed to save", error: true }); } finally { setSaving(false); } };
+  const buildOverridesForSave = () => {
+    // The Sales/Invoice dropdown is a derived control: even when the user didn't fire onChange
+    // (because the displayed value already matches the effective state), the save must always
+    // commit the dropdown's current selection so the override is explicit on the server.
+    const features = { ...overrides.features };
+    if (salesInvoiceMode === "sales") { features.sales = true; features.invoices = false; }
+    else if (salesInvoiceMode === "invoices") { features.sales = false; features.invoices = true; }
+    else { features.sales = false; features.invoices = false; }
+    return { ...overrides, features };
+  };
+  const handleSaveSubscription = async () => { if (!tenantId) return; setSaving(true); try { const overridesToSave = buildOverridesForSave(); const updated = await platformApi.updateTenantSubscription(tenantId, { subscriptionType: "plan", planKey, overrides: overridesToSave, salesInvoiceMode, startDate: subscriptionStartDate || null, expireDate: subscriptionExpireDate || null }); setDetail(updated); setOverrides({ features: updated.overrides.features, limits: updated.overrides.limits }); setSubscriptionStartDate(updated.startDate ? new Date(updated.startDate).toISOString().slice(0, 10) : ""); setSubscriptionExpireDate(updated.expireDate ? new Date(updated.expireDate).toISOString().slice(0, 10) : ""); setSubscriptionMode("plan"); setToast({ message: "Subscription saved" }); } catch (e) { setToast({ message: e instanceof Error ? e.message : "Failed to save", error: true }); } finally { setSaving(false); } };
   const handleSaveTenantDetails = async () => { if (!tenantId) return; setSaving(true); try { await platformApi.updateTenant(tenantId, { name: name.trim(), companyName: companyName.trim(), email: email.trim(), phone: phone.trim(), billingAddress: billingAddress.trim() }); setToast({ message: "Tenant details saved" }); const t = await platformApi.getTenant(tenantId); setTenant(t); } catch (e) { setToast({ message: e instanceof Error ? e.message : "Failed to save", error: true }); } finally { setSaving(false); } };
-  const handleSaveCustomBilling = async () => { if (!tenantId) return; setSaving(true); try { await platformApi.updateTenant(tenantId, { billingEmail: billingEmail.trim(), billingAmount: billingAmount === "" ? null : Number(billingAmount), billingCycle, currency: currency.trim() || "GBP", status }); const updated = await platformApi.updateTenantSubscription(tenantId, { subscriptionType: "custom", planKey: "", overrides, startDate: subscriptionStartDate || null, expireDate: subscriptionExpireDate || null }); setDetail(updated); setPlanKey(""); setSubscriptionMode("custom"); setToast({ message: "Custom billing saved" }); const t = await platformApi.getTenant(tenantId); setTenant(t); } catch (e) { setToast({ message: e instanceof Error ? e.message : "Failed to save", error: true }); } finally { setSaving(false); } };
+  const handleSaveCustomBilling = async () => { if (!tenantId) return; setSaving(true); try { await platformApi.updateTenant(tenantId, { billingEmail: billingEmail.trim(), billingAmount: billingAmount === "" ? null : Number(billingAmount), billingCycle, currency: currency.trim() || "GBP", status }); const overridesToSave = buildOverridesForSave(); const updated = await platformApi.updateTenantSubscription(tenantId, { subscriptionType: "custom", planKey: "", overrides: overridesToSave, salesInvoiceMode, startDate: subscriptionStartDate || null, expireDate: subscriptionExpireDate || null }); setDetail(updated); setPlanKey(""); setSubscriptionMode("custom"); setToast({ message: "Custom billing saved" }); const t = await platformApi.getTenant(tenantId); setTenant(t); } catch (e) { setToast({ message: e instanceof Error ? e.message : "Failed to save", error: true }); } finally { setSaving(false); } };
 
   const setFeatureOverride = (key: string, value: boolean | undefined) => { setOverrides((prev) => { const next = { ...prev, features: { ...prev.features } }; if (value === undefined) delete next.features[key]; else next.features[key] = value; return next; }); };
+  const setSalesInvoiceMode = (mode: "none" | "sales" | "invoices") => {
+    setOverrides((prev) => ({
+      ...prev,
+      features: { ...prev.features, sales: mode === "sales", invoices: mode === "invoices" },
+    }));
+  };
   const setLimitOverride = (key: string, value: number | null) => { setOverrides((prev) => ({ ...prev, limits: { ...prev.limits, [key]: value } })); };
   const handleConfirmDeleteTenant = async () => { if (!tenantId) return; try { await platformApi.deleteTenant(tenantId); setToast({ message: "Tenant deleted" }); router.push("/platform/tenants"); } catch (err) { setToast({ message: err instanceof Error ? err.message : "Failed to delete tenant", error: true }); setDeleteTenantConfirm(false); } };
   const handleConfirmDeleteUser = async () => { if (!tenantId || !deleteUserConfirm) return; try { await platformApi.deleteTenantUser(tenantId, deleteUserConfirm._id); setToast({ message: "User deleted" }); loadUsers(); } catch (err) { setToast({ message: err instanceof Error ? err.message : "Failed to delete", error: true }); } setDeleteUserConfirm(null); };
@@ -90,6 +106,19 @@ export default function TenantDetailPage() {
   const usage = detail?.usage || {};
   const sym = currency === "EUR" ? "\u20AC" : currency === "USD" ? "$" : "\u00A3";
   const isSuspended = status === "suspended";
+
+  // Sales & Invoices are mutually exclusive — controlled together via a single dropdown.
+  const SALES_INVOICE_KEYS = new Set(["sales", "invoices"]);
+  const salesInvoiceMode: "none" | "sales" | "invoices" = (() => {
+    const ovSales = overrides.features.sales;
+    const ovInv = overrides.features.invoices;
+    if (ovSales === true) return "sales";
+    if (ovInv === true) return "invoices";
+    if (ovSales === false && ovInv === false) return "none";
+    if (effectiveFeatures.sales) return "sales";
+    if (effectiveFeatures.invoices) return "invoices";
+    return "none";
+  })();
 
   return (
     <div className="max-w-4xl mx-auto">
@@ -190,10 +219,25 @@ export default function TenantDetailPage() {
           <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100 bg-gradient-to-r from-indigo-50/80 to-white">
             <div className="flex items-center gap-2"><div className="w-1.5 h-5 rounded-full bg-indigo-500" /><h2 className="text-sm font-semibold text-indigo-900 flex items-center gap-1.5"><Sparkles className="h-4 w-4" /> Feature Overrides</h2></div>
           </div>
-          <div className="p-5">
-            {features.length === 0 ? <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-3">No features in catalog.</p> : (
+          <div className="p-5 space-y-4">
+            {/* Sales / Invoice — mutually exclusive selector */}
+            <div className="p-3 rounded-lg border border-indigo-300 bg-indigo-50/40 ring-1 ring-indigo-200/50">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-gray-900">Sales / Invoice mode</p>
+                  <p className="text-xs text-gray-500 mt-0.5">Only one can be enabled at a time. Effective: <span className="font-medium text-gray-700">{effectiveFeatures.sales ? "Sales" : effectiveFeatures.invoices ? "Invoice" : "None"}</span></p>
+                </div>
+                <select value={salesInvoiceMode} onChange={(e) => setSalesInvoiceMode(e.target.value as "none" | "sales" | "invoices")} className="border border-gray-300 rounded-lg px-2 py-1 text-sm focus:ring-2 focus:ring-orange-500 focus:border-orange-500 shrink-0">
+                  <option value="none">None (both off)</option>
+                  <option value="sales">Sales</option>
+                  <option value="invoices">Invoice</option>
+                </select>
+              </div>
+            </div>
+
+            {features.filter((f) => !SALES_INVOICE_KEYS.has(f.key)).length === 0 ? <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-3">No other features in catalog.</p> : (
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                {features.map((f) => {
+                {features.filter((f) => !SALES_INVOICE_KEYS.has(f.key)).map((f) => {
                   const isOverridden = overrides.features[f.key] !== undefined;
                   return (
                     <div key={f.key} className={`flex items-center justify-between p-3 rounded-lg border transition-all ${isOverridden ? "border-indigo-300 bg-indigo-50/40 ring-1 ring-indigo-200/50" : "border-gray-200 bg-gray-50/50"}`}>
